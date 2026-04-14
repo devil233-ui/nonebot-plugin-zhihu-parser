@@ -1,8 +1,8 @@
 import time
 
 class Debouncer:
-    def __init__(self, ttl_seconds: int = 3600):
-        """防抖时间，默认 1 小时"""
+    def __init__(self, ttl_seconds: int = 86400):
+        """防抖时间 24 小时"""
         self.ttl = ttl_seconds
         self._url_cache: dict[str, float] = {}
         self._resource_cache: dict[str, float] = {}

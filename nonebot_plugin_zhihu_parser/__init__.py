@@ -12,10 +12,16 @@ from .core.download import Downloader
 from .core.render import Renderer
 from .core.debounce import Debouncer
 
+global_config = get_driver().config
+# 从 .env 读取配置，如果没有则提供默认值（分批阈值默认10，防抖默认86400秒）
+ZHIHU_BATCH_SIZE = getattr(global_config, "zhihu_batch_size", 10)
+ZHIHU_DEBOUNCE_TIME = getattr(global_config, "zhihu_debounce_time", 86400)
+
 cfg = PluginConfig()
 zhihu_parser = None
 zhihu_renderer = None
-zhihu_debouncer = Debouncer()
+# 将配置好的防抖时间传给防抖器
+zhihu_debouncer = Debouncer(ttl_seconds=ZHIHU_DEBOUNCE_TIME)
 
 @get_driver().on_startup
 async def init_parser():
@@ -25,15 +31,9 @@ async def init_parser():
     Renderer.load_resources()
     zhihu_renderer = Renderer(cfg)
 
-# ---------------------------------------------------------
-# 自定义规则：暴力破解 QQ 小程序和富文本卡片中的 JSON 隐藏链接
-# ---------------------------------------------------------
 def check_zhihu_url():
     async def _check(bot: Bot, event: MessageEvent, state: T_State) -> bool:
-        # 获取带 CQ 码的原始消息，并处理 JSON 里的转义斜杠 (比如 https:\/\/www.zhihu.com)
         raw_msg = str(event.get_message()).replace("\\/", "/")
-        
-        # 使用宽泛的正则在原始字符串里先捞出链接
         pat = re.compile(r"(https?://(?:www\.)?zhihu\.com/[^\s\"\'\\]+|https?://zhuanlan\.zhihu\.com/[^\s\"\'\\]+)")
         match = pat.search(raw_msg)
         if match:
@@ -43,7 +43,6 @@ def check_zhihu_url():
         return False
     return Rule(_check)
 
-# 改用 on_message 配合自定义 Rule，完美绕过 plaintext 的过滤
 zhihu_matcher = on_message(rule=check_zhihu_url(), priority=10, block=False)
 
 @zhihu_matcher.handle()
@@ -54,42 +53,30 @@ async def handle_zhihu(bot: Bot, event: MessageEvent, state: T_State):
         
     text = state['zhihu_raw']
     base_match = state['zhihu_match']
-    # 将 QQ 富文本中被转义的 &amp; 还原为 &，否则请求和正则都会出大问题
     url = base_match.group(0).replace("&amp;", "&")
     text = text.replace("&amp;", "&")
     session_id = event.get_session_id()
     
-    # ==========================================
-    # 防抖拦截：终于能正常工作了！
-    # ==========================================
     if zhihu_debouncer.hit_url(session_id, url):
         logger.info(f"[{session_id}] 链接 {url} 在防抖时间内，已跳过重复解析")
-        await zhihu_matcher.send("该知乎链接一小时内有人水果了，跳过解析。")
+        await zhihu_matcher.send("24小时内有人水果了，端下去罢")
         return
         
+    handlers = getattr(zhihu_parser, "_handlers", {})
     final_keyword = None
     final_match_obj = None
-    
-    handlers = getattr(zhihu_parser, "_handlers", {})
-    if not handlers:
-        logger.error("ZhihuParser 未能加载任何处理函数，请检查核心代码。")
-        return
 
-    # 1. 尝试从注册的函数上动态提取正则
     for kw, func in handlers.items():
         pat = getattr(func, "__parser_pattern__", None)
         if pat:
-            if isinstance(pat, str):
-                pat = re.compile(pat)
+            if isinstance(pat, str): pat = re.compile(pat)
             match = pat.search(text)
             if match:
                 final_keyword = kw
                 final_match_obj = match
                 break
 
-    # 2. 尝试备用硬编码正则
     if not final_match_obj:
-        # 左侧的 key 必须与 handlers.py 中 @handle 注册的字符串一字不差！
         KNOWN_PATTERNS = [
             ("/answer/", re.compile(r"zhihu\.com/question/(?P<question_id>\d+)/answer/(?P<answer_id>\d+)")),
             ("www.zhihu.com/question/", re.compile(r"zhihu\.com/question/(?P<question_id>\d+)")),
@@ -98,92 +85,82 @@ async def handle_zhihu(bot: Bot, event: MessageEvent, state: T_State):
         ]
         for exact_kw, pat in KNOWN_PATTERNS:
             match = pat.search(text)
-            # 如果匹配成功且该路由钥匙确实存在于处理器中
             if match and exact_kw in handlers:
                 final_keyword = exact_kw
                 final_match_obj = match
                 break
                 
     if not final_keyword or not final_match_obj:
-        logger.warning(f"提取到了链接 {url}，但未匹配到支持的具体知乎格式")
         return
-
-    logger.info(f"使用专业正则钥匙 '{final_keyword}' 匹配成功，开始提取数据...")
 
     try:
         parse_res = await zhihu_parser.parse(final_keyword, final_match_obj)
-        
-        if not parse_res:
-            logger.warning("解析返回为空，可能是知乎风控或该内容需要登录")
-            return
+        if not parse_res: return
             
-        logger.info("数据提取完毕，开始渲染图片...")
+        # A. 发送预览卡片
         card_path = await zhihu_renderer.render_card(parse_res)
-        
         if card_path and card_path.exists():
             await zhihu_matcher.send(MessageSegment.image(card_path))
-        else:
-            await zhihu_matcher.send("渲染卡片失败，下方为你尝试直接发送内容")
 
-        # ==========================================
-        # 步骤 B：打包所有长文本和原图构建合并转发（图文混排版）
-        # ==========================================
-        nodes = []
+        # B. 分批次合并转发逻辑
         bot_id = int(bot.self_id)
+        img_counter = 0
+        batch_num = 1
+        current_combined_msg = Message()
         
-        def add_node(msg_content):
-            nodes.append(MessageSegment.node_custom(user_id=bot_id, nickname="知乎解析", content=Message(msg_content)))
-            
-        # 我们把所有内容拼装到同一个 Message 对象里，实现真正的“图文混排”
-        combined_msg = Message()
-        
+        # 初始添加标题
         if getattr(parse_res, "title", None):
-            combined_msg += MessageSegment.text(f"【{parse_res.title}】\n\n")
-            
-        has_content = False
-        if hasattr(parse_res, "contents") and parse_res.contents:
-            for content in parse_res.contents:
-                try:
-                    # 拼接文字
-                    if hasattr(content, "text") and content.text:
-                        combined_msg += MessageSegment.text(str(content.text) + "\n")
-                        has_content = True
-                        
-                    # 拼接图片或视频
-                    if hasattr(content, "get_path"):
-                        file_path = await content.get_path()
-                        if file_path and hasattr(file_path, "exists") and file_path.exists():
-                            ext = file_path.suffix.lower()
-                            if ext in [".jpg", ".jpeg", ".png", ".gif", ".webp"]:
-                                combined_msg += MessageSegment.image(file_path)
-                                combined_msg += MessageSegment.text("\n") # 图片后加个换行防止文字挤在一起
-                                has_content = True
-                            elif ext in [".mp4", ".mov", ".avi"]:
-                                combined_msg += MessageSegment.video(file_path)
-                                combined_msg += MessageSegment.text("\n")
-                                has_content = True
-                except Exception as e:
-                    logger.debug(f"组合图文消息失败: {e}")
-                    
-        # 兜底：如果没提取到富文本内容，就把纯文本摘要塞进去
-        if not has_content and getattr(parse_res, "text", None):
-            combined_msg += MessageSegment.text(str(parse_res.text))
+            current_combined_msg += MessageSegment.text(f"【{parse_res.title}】\n\n")
 
-        # 将这条组装好的超长图文混排消息作为一个整体节点插入
-        if combined_msg:
-            add_node(combined_msg)
-
-        # 执行 OneBot 合并转发发送请求
-
-        if nodes:
+        async def send_current_batch(msg: Message, is_last: bool = False):
+            if not msg: return
+            prefix = f"(第{batch_num}部分) " if not (batch_num == 1 and is_last) else ""
+            node = [MessageSegment.node_custom(user_id=bot_id, nickname=f"知乎解析 {prefix}", content=msg)]
             try:
                 if isinstance(event, GroupMessageEvent):
-                    await bot.call_api("send_group_forward_msg", group_id=event.group_id, messages=nodes)
+                    await bot.call_api("send_group_forward_msg", group_id=event.group_id, messages=node)
                 else:
-                    await bot.call_api("send_private_forward_msg", user_id=event.user_id, messages=nodes)
+                    await bot.call_api("send_private_forward_msg", user_id=event.user_id, messages=node)
             except Exception as e:
-                logger.error(f"发送合并转发失败: {e}")
-                await zhihu_matcher.send("发送长文合并转发失败，这通常是因为内容被腾讯风控或字数过多。")
+                logger.error(f"发送分批转发失败: {e}")
+                await zhihu_matcher.send(f"发送第{batch_num}部分转发失败，可能内容过大或受限")
+
+        # 遍历正文内容
+        if hasattr(parse_res, "contents") and parse_res.contents:
+            for content in parse_res.contents:
+                # 1. 处理文字
+                if hasattr(content, "text") and content.text:
+                    current_combined_msg += MessageSegment.text(str(content.text) + "\n")
+                
+                # 2. 处理图片/媒体（增加精准异常捕获）
+                if hasattr(content, "get_path"):
+                    try:
+                        file_path = await content.get_path()
+                        if file_path and getattr(file_path, "exists", lambda: False)():
+                            ext = file_path.suffix.lower()
+                            if ext in [".jpg", ".jpeg", ".png", ".gif", ".webp"]:
+                                current_combined_msg += MessageSegment.image(file_path)
+                                current_combined_msg += MessageSegment.text("\n")
+                                img_counter += 1
+                            elif ext in [".mp4", ".mov", ".avi"]:
+                                current_combined_msg += MessageSegment.video(file_path)
+                                current_combined_msg += MessageSegment.text("\n")
+                    except RuntimeError:
+                        # 纯文本段落 (TextContent) 调用 get_path 会报错，安全忽略即可
+                        pass
+                    except Exception as e:
+                        logger.debug(f"提取媒体文件时发生意外错误: {e}")
+
+                # 应用从 .env 中读取的分批发包阈值
+                if img_counter >= ZHIHU_BATCH_SIZE:
+                    await send_current_batch(current_combined_msg)
+                    current_combined_msg = Message() 
+                    img_counter = 0
+                    batch_num += 1
+
+        # 发送剩余的内容
+        if current_combined_msg:
+            await send_current_batch(current_combined_msg, is_last=True)
                 
     except Exception as e:
-        logger.exception("解析知乎链接时发生严重错误，完整堆栈如下：")
+        logger.exception("解析知乎链接时发生严重错误")
