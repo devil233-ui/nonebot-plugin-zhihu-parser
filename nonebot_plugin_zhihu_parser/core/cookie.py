@@ -6,7 +6,7 @@ from http import cookiejar
 from http.cookies import SimpleCookie
 from urllib.parse import urlparse
 
-from astrbot.api import logger
+from nonebot.log import logger
 
 from .config import ParserItem, PluginConfig
 

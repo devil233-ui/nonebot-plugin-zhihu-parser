@@ -7,7 +7,7 @@ from typing import Any, Callable
 from bs4 import BeautifulSoup
 from curl_cffi import requests as curl_requests
 
-from astrbot.api import logger
+from nonebot.log import logger
 
 from ...exception import ParseException
 from .common import RequestContext
@@ -29,6 +29,9 @@ class ZhihuRequestMixin:
         for profile_name, profile_url, headers, impersonate in self._request_profiles(
             url
         ):
+            # 【精准注入】：在拿到 headers 后，发起请求前，强行塞入我们的 CK
+            if hasattr(self, "mycfg") and getattr(self.mycfg, "cookie", None):
+                headers["Cookie"] = str(self.mycfg.cookie)
             try:
                 response_ctx = await self._request_text(
                     profile_url,
