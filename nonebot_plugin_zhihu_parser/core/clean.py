@@ -4,8 +4,8 @@ from pathlib import Path
 from nonebot.log import logger
 
 class CacheCleaner:
-    def __init__(self, temp_dir: str | Path, max_age_seconds: int = 86400):
-        """默认清理 24小时 (86400秒) 前的缓存文件"""
+    def __init__(self, temp_dir: str | Path, max_age_seconds: int = 86400*7):
+        """默认清理 一周 前的缓存文件"""
         self.temp_dir = Path(temp_dir)
         self.max_age = max_age_seconds
         self.temp_dir.mkdir(parents=True, exist_ok=True)

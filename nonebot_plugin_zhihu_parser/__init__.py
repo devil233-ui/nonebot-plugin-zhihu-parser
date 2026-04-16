@@ -11,11 +11,13 @@ from .core.parsers.zhihu.parser import ZhihuParser
 from .core.download import Downloader
 from .core.render import Renderer
 from .core.debounce import Debouncer
+from .core.clean import CacheCleaner
 
 global_config = get_driver().config
 # 从 .env 读取配置，如果没有则提供默认值（分批阈值默认10，防抖默认86400秒）
 ZHIHU_BATCH_SIZE = getattr(global_config, "zhihu_batch_size", 10)
 ZHIHU_DEBOUNCE_TIME = getattr(global_config, "zhihu_debounce_time", 86400)
+ZHIHU_CACHE_MAX_AGE = getattr(global_config, "zhihu_cache_max_age", 86400 * 7)
 
 cfg = PluginConfig()
 zhihu_parser = None
@@ -30,6 +32,10 @@ async def init_parser():
     zhihu_parser = ZhihuParser(cfg, downloader)
     Renderer.load_resources()
     zhihu_renderer = Renderer(cfg)
+    zhihu_cleaner = CacheCleaner(temp_dir=cfg.cache_dir, max_age_seconds=ZHIHU_CACHE_MAX_AGE)
+    zhihu_cleaner.start()
+    ldays = ZHIHU_CACHE_MAX_AGE / 86400
+    logger.info(f"知乎解析插件：{days:g}天缓存自动清理任务已挂载启动！")
 
 def check_zhihu_url():
     async def _check(bot: Bot, event: MessageEvent, state: T_State) -> bool:
