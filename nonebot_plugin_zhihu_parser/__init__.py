@@ -18,6 +18,7 @@ global_config = get_driver().config
 ZHIHU_BATCH_SIZE = getattr(global_config, "zhihu_batch_size", 10)
 ZHIHU_DEBOUNCE_TIME = getattr(global_config, "zhihu_debounce_time", 86400)
 ZHIHU_CACHE_MAX_AGE = getattr(global_config, "zhihu_cache_max_age", 86400 * 7)
+ZHIHU_MAX_IMAGES = getattr(global_config, "zhihu_max_images", 50)
 
 cfg = PluginConfig()
 zhihu_parser = None
@@ -32,9 +33,11 @@ async def init_parser():
     zhihu_parser = ZhihuParser(cfg, downloader)
     Renderer.load_resources()
     zhihu_renderer = Renderer(cfg)
-    zhihu_cleaner = CacheCleaner(temp_dir=cfg.cache_dir, max_age_seconds=ZHIHU_CACHE_MAX_AGE)
+    max_age = int(ZHIHU_CACHE_MAX_AGE)
+    zhihu_cleaner = CacheCleaner(temp_dir=cfg.cache_dir, max_age_seconds=max_age)
     zhihu_cleaner.start()
-    ldays = ZHIHU_CACHE_MAX_AGE / 86400
+    
+    days = max_age / 86400
     logger.info(f"知乎解析插件：{days:g}天缓存自动清理任务已挂载启动！")
 
 def check_zhihu_url():
@@ -113,6 +116,8 @@ async def handle_zhihu(bot: Bot, event: MessageEvent, state: T_State):
         img_counter = 0
         batch_num = 1
         current_combined_msg = Message()
+        total_img_counter = 0
+        limit_reached = False
         
         # 初始添加标题
         if getattr(parse_res, "title", None):
@@ -128,8 +133,50 @@ async def handle_zhihu(bot: Bot, event: MessageEvent, state: T_State):
                 else:
                     await bot.call_api("send_private_forward_msg", user_id=event.user_id, messages=node)
             except Exception as e:
-                logger.error(f"发送分批转发失败: {e}")
-                await zhihu_matcher.send(f"发送第{batch_num}部分转发失败，可能内容过大或受限")
+                logger.error(f"发送第 {batch_num} 部分转发失败: {e}")
+                
+                # [恢复] 降级单发机制：因为现在有总量限制，可以放心拆包单发了
+                await zhihu_matcher.send(f"⚠️ 第 {batch_num} 部分触发风控拦截，正在自动拆分单独发送...")
+                
+                # [新增] 专门处理长文本折叠的内部助手函数
+                async def safe_send_text(text_msg: Message):
+                    t_str = str(text_msg).strip()
+                    if not t_str: return
+                    
+                    # 纯文字装进合并转发里“折叠”起来
+                    if len(t_str): 
+                        t_node = [MessageSegment.node_custom(user_id=bot_id, nickname="风控部分纯文字折叠", content=Message(t_str))]
+                        try:
+                            if isinstance(event, GroupMessageEvent):
+                                await bot.call_api("send_group_forward_msg", group_id=event.group_id, messages=t_node)
+                            else:
+                                await bot.call_api("send_private_forward_msg", user_id=event.user_id, messages=t_node)
+                        except Exception:
+                            # 终极兜底：万一纯文本转发都失败，截断只发前500字
+                            await zhihu_matcher.send(t_str[:500] + "\n...[字数过多已截断]")
+                    else:
+                        # 不满 150 字的短句（比如图注、小标题）直接发，不影响阅读连贯性
+                        await zhihu_matcher.send(text_msg)
+
+                fallback_msg = Message()
+                for seg in msg:
+                    if seg.type == 'text':
+                        fallback_msg += seg
+                    else:
+                        # 先发送之前攒着的文字（带折叠判定）
+                        try: await safe_send_text(fallback_msg)
+                        except Exception: pass
+                        fallback_msg = Message()
+                        
+                        # 单发媒体
+                        try: await zhihu_matcher.send(Message(seg))
+                        except Exception as sub_e: 
+                            logger.error(f"单发媒体失败（严重风控死锁）: {sub_e}")
+                            await zhihu_matcher.send("🚫 [一张图片/视频因触发腾讯极其严格的审核被无情抹杀]")
+                            
+                # 收尾剩余文字
+                try: await safe_send_text(fallback_msg)
+                except Exception: pass
 
         # 遍历正文内容
         if hasattr(parse_res, "contents") and parse_res.contents:
@@ -143,30 +190,42 @@ async def handle_zhihu(bot: Bot, event: MessageEvent, state: T_State):
                     try:
                         file_path = await content.get_path()
                         if file_path and getattr(file_path, "exists", lambda: False)():
+                            # 换完后上一行是：
                             ext = file_path.suffix.lower()
                             if ext in [".jpg", ".jpeg", ".png", ".gif", ".webp"]:
                                 current_combined_msg += MessageSegment.image(file_path)
                                 current_combined_msg += MessageSegment.text("\n")
                                 img_counter += 1
+                                total_img_counter += 1  # [新增] 累加总数
                             elif ext in [".mp4", ".mov", ".avi"]:
                                 current_combined_msg += MessageSegment.video(file_path)
                                 current_combined_msg += MessageSegment.text("\n")
+                                img_counter += 2 
+                                total_img_counter += 2  # [新增] 累加总数
                     except RuntimeError:
-                        # 纯文本段落 (TextContent) 调用 get_path 会报错，安全忽略即可
                         pass
                     except Exception as e:
-                        logger.debug(f"提取媒体文件时发生意外错误: {e}")
+                        logger.debug(f"读取媒体失败: {e}")
 
-                # 应用从 .env 中读取的分批发包阈值
-                if img_counter >= ZHIHU_BATCH_SIZE:
+                # [修改] 达到单批次阈值 或 达到总量限制 时触发发包
+                if img_counter >= ZHIHU_BATCH_SIZE or total_img_counter >= ZHIHU_MAX_IMAGES:
                     await send_current_batch(current_combined_msg)
                     current_combined_msg = Message() 
                     img_counter = 0
                     batch_num += 1
+                    
+                # [新增] 总量阻断：超过设定总量直接掐断循环
+                if total_img_counter >= ZHIHU_MAX_IMAGES:
+                    limit_reached = True
+                    break
 
-        # 发送剩余的内容
-        if current_combined_msg:
+        # [修改] 如果没有被提前阻断，才发送收尾段落
+        if current_combined_msg and not limit_reached:
             await send_current_batch(current_combined_msg, is_last=True)
-                
+            
+        # [新增] 触发了截断则发送文案提示
+        if limit_reached:
+            await zhihu_matcher.send("不刷屏了，剩下的请点击原链接跳转阅读")
+
     except Exception as e:
         logger.exception("解析知乎链接时发生严重错误")
