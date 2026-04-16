@@ -15,7 +15,7 @@ from PIL import Image, ImageDraw, ImageFont
 # 【修改点 1】：替换为 Nonebot2 的日志模块
 from nonebot.log import logger
 
-from .config import PluginConfig
+from nonebot_plugin_zhihu_parser.config import PluginConfig
 from .data import GraphicsContent, ParseResult
 
 # 定义类型变量

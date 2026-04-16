@@ -12,7 +12,7 @@ from tqdm.asyncio import tqdm
 
 from nonebot.log import logger
 
-from .config import PluginConfig
+from nonebot_plugin_zhihu_parser.config import PluginConfig
 from .constants import COMMON_HEADER
 from .exception import (
     DownloadException,

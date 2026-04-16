@@ -8,8 +8,7 @@ from urllib.parse import urlparse
 
 from nonebot.log import logger
 
-from .config import ParserItem, PluginConfig
-
+from nonebot_plugin_zhihu_parser.config import ParserItem, PluginConfig
 
 @dataclass(slots=True)
 class Cookie:

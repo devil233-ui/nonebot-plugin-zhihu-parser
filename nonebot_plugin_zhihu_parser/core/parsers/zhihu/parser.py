@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import ClassVar
 
-from ...config import PluginConfig
+from nonebot_plugin_zhihu_parser.config import PluginConfig
 from ...data import Platform
 from ...download import Downloader
 from ..base import BaseParser

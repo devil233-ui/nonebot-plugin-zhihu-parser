@@ -6,7 +6,7 @@ from nonebot import get_driver
 from nonebot.rule import Rule
 from nonebot.typing import T_State
 
-from .core.config import PluginConfig
+from nonebot_plugin_zhihu_parser.config import PluginConfig
 from .core.parsers.zhihu.parser import ZhihuParser
 from .core.download import Downloader
 from .core.render import Renderer

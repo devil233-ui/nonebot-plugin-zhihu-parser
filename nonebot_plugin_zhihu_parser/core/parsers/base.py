@@ -10,7 +10,7 @@ from typing import TYPE_CHECKING, Any, ClassVar, TypeVar, cast
 from aiohttp import ClientError, ClientSession, ClientTimeout
 from typing_extensions import Unpack
 
-from ..config import ParserItem, PluginConfig
+from nonebot_plugin_zhihu_parser.config import ParserItem, PluginConfig
 from ..constants import ANDROID_HEADER, COMMON_HEADER, IOS_HEADER
 from ..data import (
     AudioContent,
