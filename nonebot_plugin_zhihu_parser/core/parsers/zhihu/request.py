@@ -30,9 +30,39 @@ class ZhihuRequestMixin:
         for profile_name, profile_url, headers, impersonate in self._request_profiles(
             url
         ):
-            # 【精准注入】：在拿到 headers 后，发起请求前，强行塞入我们的 CK
-            if hasattr(self, "mycfg") and getattr(self.mycfg, "cookie", None):
-                headers["Cookie"] = str(self.mycfg.cookie)
+            # # 【精准注入】：在拿到 headers 后，发起请求前，强行塞入我们的 CK
+            # if hasattr(self, "mycfg") and getattr(self.mycfg, "cookie", None):
+            #     headers["Cookie"] = str(self.mycfg.cookie)
+
+            if hasattr(self, "cfg") and hasattr(self.cfg, "cookie_file") and self.cfg.cookie_file.exists():
+                try:
+                    # 实时读取并清理两端的换行符和空格
+                    real_time_cookie = self.cfg.cookie_file.read_text(encoding="utf-8").strip()
+                    if real_time_cookie:
+                        # 强行剔除可能存在的大小写重复键，防止 curl_cffi 畸形发包
+                        headers.pop("Cookie", None)
+                        headers.pop("cookie", None)
+                        headers["cookie"] = real_time_cookie
+                        
+                        # 顺手同步到内存
+                        if hasattr(self, "mycfg"):
+                            self.mycfg.cookie = real_time_cookie
+                except Exception as e:
+                    logger.warning(f"读取实时 Cookie 文件失败，将尝试使用内存旧配置: {e}")
+                    if hasattr(self, "mycfg") and getattr(self.mycfg, "cookie", None):
+                        headers["cookie"] = str(self.mycfg.cookie)
+            elif hasattr(self, "mycfg") and getattr(self.mycfg, "cookie", None):
+                # 兜底：万一没拿到文件，用内存里的
+                headers.pop("Cookie", None)
+                headers["cookie"] = str(self.mycfg.cookie)
+
+            # --- [新增] 发包前终极抓包，看看内存里的 headers 到底长啥样 ---
+            logger.warning(f"🔍 [发包前] Headers 包含的键: {list(headers.keys())}")
+            # 用 repr() 强制显示原生字符串结构，捕捉隐形字符
+            current_ck = headers.get("Cookie", headers.get("cookie", "空"))
+            logger.warning(f"🔍 [发包前] 注入的 Cookie 值 (repr): {repr(current_ck)}")
+            logger.warning(f"🔍 [发包前] Cookie 长度: {len(current_ck)}")
+
             try:
                 response_ctx = await self._request_text(
                     profile_url,
