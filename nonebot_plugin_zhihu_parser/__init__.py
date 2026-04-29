@@ -12,6 +12,7 @@ from .core.download import Downloader
 from .core.render import Renderer
 from .core.debounce import Debouncer
 from .core.clean import CacheCleaner
+from .core.exception import ParseException
 
 global_config = get_driver().config
 # 从 .env 读取配置，如果没有则提供默认值（分批阈值默认10，防抖默认86400秒）
@@ -44,11 +45,26 @@ def check_zhihu_url():
     async def _check(bot: Bot, event: MessageEvent, state: T_State) -> bool:
         raw_msg = str(event.get_message()).replace("\\/", "/")
         pat = re.compile(r"(https?://(?:www\.)?zhihu\.com/[^\s\"\'\\]+|https?://zhuanlan\.zhihu\.com/[^\s\"\'\\]+)")
+        
+        # 1. 正常情况：直接检测消息里有没有知乎链接
         match = pat.search(raw_msg)
         if match:
             state['zhihu_match'] = match
             state['zhihu_raw'] = raw_msg
             return True
+            
+        # 2. 引用解析情况：检查是不是发了“解析”并且带了引用(reply)
+        # 兼容这几个词：解析、提取、解析知乎
+        if raw_msg.strip() in ["解析", "提取", "解析知乎"] and event.reply:
+            # 提取被引用原消息（哪怕是小程序 JSON 卡片，这里也会变成字符串）
+            reply_msg = str(event.reply.message).replace("\\/", "/")
+            reply_match = pat.search(reply_msg)
+            if reply_match:
+                # 狸猫换太子：把引用里的链接和文本存进 state，骗过后面的程序
+                state['zhihu_match'] = reply_match
+                state['zhihu_raw'] = reply_msg 
+                return True
+                
         return False
     return Rule(_check)
 
@@ -62,7 +78,13 @@ async def handle_zhihu(bot: Bot, event: MessageEvent, state: T_State):
         
     text = state['zhihu_raw']
     base_match = state['zhihu_match']
-    url = base_match.group(0).replace("&amp;", "&")
+    
+    # 原始提取的 URL
+    raw_url = base_match.group(0).replace("&amp;", "&")
+    # [新增清洗] 暴力剔除 URL 尾部可能因为引用而粘连的中文和特殊标点
+    import re
+    url = re.sub(r'[\u4e00-\u9fa5\u3000-\u303f\uff00-\uffef\]\}）】”"。，！？]+$', '', raw_url)
+    
     text = text.replace("&amp;", "&")
     session_id = event.get_session_id()
     
@@ -101,6 +123,8 @@ async def handle_zhihu(bot: Bot, event: MessageEvent, state: T_State):
                 
     if not final_keyword or not final_match_obj:
         return
+
+    logger.warning(f"🔍 [X光机] 开始解析！命中规则: {final_keyword}, 提取参数: {final_match_obj.group(0)}")
 
     try:
         parse_res = await zhihu_parser.parse(final_keyword, final_match_obj)
@@ -227,5 +251,12 @@ async def handle_zhihu(bot: Bot, event: MessageEvent, state: T_State):
         if limit_reached:
             await zhihu_matcher.send("不刷屏了，剩下的请点击原链接跳转阅读")
 
+    # 将底部的 except ParseException as e: 替换为：
+    except ParseException as e:
+        logger.warning(f"知乎抓取被阻断: {e}")
+        # [新增] 强制打印出被吞噬的底层真实报错
+        if e.__cause__:
+            logger.error(f"💥 [X光机] 底层致命报错: {e.__cause__}")
+        await zhihu_matcher.send(str(e))
     except Exception as e:
         logger.exception("解析知乎链接时发生严重错误")

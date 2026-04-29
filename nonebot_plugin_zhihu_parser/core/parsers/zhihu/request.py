@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 from typing import Any, Callable
+from http.cookies import SimpleCookie
 
 from bs4 import BeautifulSoup
 from curl_cffi import requests as curl_requests
@@ -268,6 +269,33 @@ class ZhihuRequestMixin:
             )
 
         response = await asyncio.to_thread(do_request)
+        
+        # --- 动态 Cookie 保活机制 ---
+        if response.cookies:
+            try:
+                new_cookies_dict = response.cookies.get_dict()
+                if new_cookies_dict:
+                    # 1. 读取原有的旧 Cookie
+                    old_cookie_str = str(getattr(self.mycfg, "cookie", ""))
+                    cookie_obj = SimpleCookie(old_cookie_str)
+                    
+                    # 2. 用服务器返回的新字段进行覆盖/更新
+                    for k, v in new_cookies_dict.items():
+                        cookie_obj[k] = v
+                        
+                    # 3. 重新组装成标准的 Cookie 字符串
+                    new_cookie_str = "; ".join([f"{k}={m.value}" for k, m in cookie_obj.items()])
+                    
+                    # 4. 更新内存，让紧接着的下一个并发请求立刻用上新 CK
+                    self.mycfg.cookie = new_cookie_str
+                    
+                    # 5. 持久化写回 config 目录下的 txt 文件
+                    if hasattr(self, "cfg") and hasattr(self.cfg, "cookie_file"):
+                        self.cfg.cookie_file.write_text(new_cookie_str, encoding="utf-8")
+                        logger.debug(f"[知乎保活] 已动态更新本地 CK，接收到 {len(new_cookies_dict)} 个新字段")
+            except Exception as e:
+                logger.warning(f"[知乎保活] 动态更新 Cookie 失败: {e}")
+
         return {
             "status_code": int(response.status_code),
             "final_url": str(response.url),
