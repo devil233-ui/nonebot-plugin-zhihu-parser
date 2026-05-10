@@ -257,6 +257,10 @@ async def handle_zhihu(bot: Bot, event: MessageEvent, state: T_State):
         # [新增] 强制打印出被吞噬的底层真实报错
         if e.__cause__:
             logger.error(f"💥 [X光机] 底层致命报错: {e.__cause__}")
+        
+        # [新增] 触发回滚！把毒数据从防抖池踢出去
+        zhihu_debouncer.rollback_url(session_id, url)
+        
         await zhihu_matcher.send(str(e))
     except Exception as e:
         logger.exception("解析知乎链接时发生严重错误")

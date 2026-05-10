@@ -5,7 +5,6 @@ from pathlib import Path
 from typing import Any, ParamSpec, TypeVar
 
 import aiofiles
-import yt_dlp
 from aiohttp import ClientError, ClientSession, ClientTimeout
 from msgspec import Struct, convert
 from tqdm.asyncio import tqdm

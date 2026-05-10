@@ -27,3 +27,10 @@ class Debouncer:
                 if now - cache[k] >= self.ttl:
                     del cache[k]
         return False
+    
+    # [新增] 专门用于抓取失败时的缓存回滚机制
+    def rollback_url(self, session_id: str, url: str) -> None:
+        """如果解析失败，将 URL 从防抖池中移除，允许用户立刻重试"""
+        key = f"{session_id}:{url}"
+        if key in self._url_cache:
+            del self._url_cache[key]
