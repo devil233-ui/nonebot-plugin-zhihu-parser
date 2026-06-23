@@ -25,7 +25,6 @@ from .utils import LimitedSizeDict, generate_file_name, merge_av, safe_unlink
 P = ParamSpec("P")
 T = TypeVar("T")
 
-
 def auto_task(func: Callable[P, Coroutine[Any, Any, T]]) -> Callable[P, Task[T]]:
     """装饰器：自动将异步函数调用转换为 Task, 完整保留类型提示"""
 
@@ -36,7 +35,6 @@ def auto_task(func: Callable[P, Coroutine[Any, Any, T]]) -> Callable[P, Task[T]]
         return create_task(coro, name=func.__name__ + " | " + name)
 
     return wrapper
-
 
 class VideoInfo(Struct):
     title: str
@@ -59,7 +57,6 @@ class VideoInfo(Struct):
     @property
     def author_name(self) -> str:
         return f"{self.channel}@{self.uploader}"
-
 
 class Downloader:
     """下载器，支持youtube-dlp 和 流式下载"""
@@ -95,15 +92,37 @@ class Downloader:
         # 如果文件存在，则直接返回
         if file_path.exists():
             return file_path
-        headers = headers or self.default_headers
+
+        # 【防毒清洗】API传过来的 headers 包含了 x-zse-96 等专属接口签名和 Cookie
+        # 静态 CDN (zhimg.com) 收到这些非常规头部会直接报 403！必须将请求头彻底洗白！
+        safe_keys = {"user-agent", "accept", "accept-language", "accept-encoding"}
+        req_headers = {k: v for k, v in (headers or self.default_headers).items() if k.lower() in safe_keys}
+        
+        # 补充标准的防盗链
+        if "zhimg.com" in url or "zhihu.com" in url:
+            req_headers["Referer"] = "https://www.zhihu.com/"
+
         retries = self.cfg.download_retry_times
         for attempt in range(retries + 1):
             try:
+                req_url = url
+                
+                # 【404 容错降级】仅做尺寸降级，不再篡改 /50/ 等特殊的存储桶路径
+                if attempt > 0:
+                    for suffix in ["_1440w.", "_720w.", "_hd.", "_l."]:
+                        if suffix in req_url:
+                            req_url = req_url.replace(suffix, "_b.")
+                            break
+                    else:
+                        if "_b." in req_url:
+                            req_url = req_url.replace("_b.", "_r.")
+
                 async with self.client.get(
-                    url, headers=headers, allow_redirects=True, proxy=proxy
+                    req_url, headers=req_headers, allow_redirects=True, proxy=proxy
                 ) as response:
                     if response.status >= 400:
                         raise ClientError(f"HTTP {response.status} {response.reason}")
+
                     content_length = response.content_length
                     max_bytes = self.max_size * 1024 * 1024
 

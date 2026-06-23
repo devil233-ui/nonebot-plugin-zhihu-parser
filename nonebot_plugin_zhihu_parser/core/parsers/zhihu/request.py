@@ -13,463 +13,155 @@ from nonebot.log import logger
 from ...exception import ParseException
 from .common import RequestContext
 
+from .zse_signer import sign_zhihu_fetch_request
+
+import httpx
 
 class ZhihuRequestMixin:
-    async def _fetch_initial_data(
-        self,
-        url: str,
-        *,
-        validator: Callable[[dict[str, Any]], bool],
-    ) -> tuple[dict[str, Any], dict[str, str]]:
-        last_error: Exception | None = None
-        saw_challenge = False
-        saw_login = False
-        saw_invalid_target = False
-        saw_initial_data = False
+    async def _fetch_initial_data(self, url: str, validator: Callable | None = None, **kwargs) -> tuple[dict[str, Any], dict[str, str]]:
+        cookie_str = ""
+        try:
+            cookie_file = self.cfg.config_dir / "zhihu_cookies.txt"
+            if cookie_file.exists():
+                cookie_str = cookie_file.read_text(encoding="utf-8").strip()
+        except Exception as e:
+            logger.warning(f"[知乎 API] 读取 Cookie 文件失败: {e}")
 
-        for profile_name, profile_url, headers, impersonate in self._request_profiles(
-            url
-        ):
-            # # 【精准注入】：在拿到 headers 后，发起请求前，强行塞入我们的 CK
-            # if hasattr(self, "mycfg") and getattr(self.mycfg, "cookie", None):
-            #     headers["Cookie"] = str(self.mycfg.cookie)
-            if hasattr(self, "cfg") and hasattr(self.cfg, "cookie_file") and self.cfg.cookie_file.exists():
-                try:
-                    real_time_cookie = self.cfg.cookie_file.read_text(encoding="utf-8").strip()
-                    if real_time_cookie:
-                        headers.pop("Cookie", None)
-                        headers.pop("cookie", None)
-                        headers["cookie"] = real_time_cookie
-                        if hasattr(self, "mycfg"):
-                            self.mycfg.cookie = real_time_cookie
-                except Exception as e:
-                    logger.warning(f"读取实时 Cookie 文件失败: {e}")
-                    if hasattr(self, "mycfg") and getattr(self.mycfg, "cookie", None):
-                        headers["cookie"] = str(self.mycfg.cookie)
-            elif hasattr(self, "mycfg") and getattr(self.mycfg, "cookie", None):
-                headers.pop("Cookie", None)
-                headers["cookie"] = str(self.mycfg.cookie)
-            # logger.warning(f"🔍 [发包前] Headers 包含的键: {list(headers.keys())}")
-            # # 用 repr() 强制显示原生字符串结构，捕捉隐形字符
-            # current_ck = headers.get("Cookie", headers.get("cookie", "空"))
-            # logger.warning(f"🔍 [发包前] 注入的 Cookie 值 (repr): {repr(current_ck)}")
-            # logger.warning(f"🔍 [发包前] Cookie 长度: {len(current_ck)}")
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+            "Referer": "https://www.zhihu.com/",
+        }
+        # 绝不篡改！原封不动地发送洗血得到的完整 Cookie，保证底层签名校验通过
+        if cookie_str:
+            headers["Cookie"] = cookie_str
 
-            try:
-                response_ctx = await self._request_text(
-                    profile_url,
-                    headers=headers,
-                    impersonate=impersonate,
-                )
-
-                html_text = str(response_ctx["text"])
-                final_url = str(response_ctx["final_url"])
-                status_code = int(response_ctx["status_code"])
-
-                if self._is_challenge_page(html_text, status_code=status_code):
-                    saw_challenge = True
-                    logger.debug(
-                        f"[知乎] {profile_name} 命中反爬挑战页: {profile_url} -> {final_url}"
-                    )
-                    continue
-
-                if self._is_login_page(final_url, html_text):
-                    saw_login = True
-                    logger.debug(
-                        f"[知乎] {profile_name} 命中登录页: {profile_url} -> {final_url}"
-                    )
-                    continue
-
-                initial_data = self._extract_initial_data(html_text)
-                if not initial_data:
-                    logger.debug(
-                        f"[知乎] {profile_name} 未找到可解析 initialData: "
-                        f"{profile_url} -> {final_url}, status={status_code}"
-                    )
-                    continue
-
-                saw_initial_data = True
-                if validator(initial_data):
-                    logger.debug(
-                        f"[知乎] 使用 {profile_name} 请求成功: {profile_url} -> {final_url}"
-                    )
-                    return initial_data, headers
-
-                saw_invalid_target = True
-                logger.debug(
-                    f"[知乎] {profile_name} 拿到的页面不是目标页: "
-                    f"{profile_url} -> {final_url}, status={status_code}"
-                )
-            except Exception as exc:
-                last_error = exc
-                logger.debug(
-                    f"[知乎] {profile_name} 请求失败: {profile_url}, error={exc}"
-                )
-
-        if saw_challenge:
-            if self.mycfg.cookies:
-                raise ParseException(
-                    "知乎抓取失败：当前 cookies 可能失效，或请求仍被风控拦截"
-                )
-            raise ParseException("知乎抓取失败：站点返回反爬挑战页，请配置有效 cookies")
-
-        if saw_login:
-            if self.mycfg.cookies:
-                raise ParseException("知乎抓取失败：当前 cookies 可能失效，或权限不足")
-            raise ParseException(
-                "知乎抓取失败：当前请求被引导到登录页，请配置有效 cookies"
-            )
-
-        if saw_invalid_target or saw_initial_data:
-            raise ParseException("知乎抓取失败：未拿到目标知乎页面")
-
-        raise ParseException("知乎页面抓取失败") from last_error
-
-    async def _fetch_json_data(
-        self,
-        url: str,
-        *,
-        validator: Callable[[dict[str, Any]], bool],
-    ) -> tuple[dict[str, Any], dict[str, str]]:
-        last_error: Exception | None = None
-        saw_challenge = False
-        saw_forbidden = False
-        saw_login = False
-        saw_invalid_target = False
-        saw_json_payload = False
-
-        for profile_name, profile_url, headers, impersonate in self._request_profiles(
-            url,
-            accept="application/json, text/plain, */*",
-        ):
-            try:
-                response_ctx = await self._request_text(
-                    profile_url,
-                    headers=headers,
-                    impersonate=impersonate,
-                )
-
-                body_text = str(response_ctx["text"])
-                final_url = str(response_ctx["final_url"])
-                status_code = int(response_ctx["status_code"])
-                content_type = str(response_ctx.get("content_type") or "")
-
-                if self._is_challenge_page(body_text, status_code=status_code):
-                    saw_challenge = True
-                    logger.debug(
-                        f"[知乎] {profile_name} 命中反爬挑战接口: {profile_url} -> {final_url}"
-                    )
-                    continue
-
-                if self._is_login_page(final_url, body_text):
-                    saw_login = True
-                    logger.debug(
-                        f"[知乎] {profile_name} 命中登录接口: {profile_url} -> {final_url}"
-                    )
-                    continue
-
-                if status_code in (401, 403):
-                    saw_forbidden = True
-                    logger.debug(
-                        f"[知乎] {profile_name} JSON 接口无权限: "
-                        f"{profile_url} -> {final_url}, status={status_code}"
-                    )
-                    continue
-
-                if status_code >= 400:
-                    saw_invalid_target = True
-                    logger.debug(
-                        f"[知乎] {profile_name} JSON 接口状态异常: "
-                        f"{profile_url} -> {final_url}, status={status_code}"
-                    )
-                    continue
-
-                payload = self._extract_json_payload(
-                    body_text,
-                    content_type=content_type,
-                )
-                if payload is None:
-                    logger.debug(
-                        f"[知乎] {profile_name} 未返回可解析 JSON: "
-                        f"{profile_url} -> {final_url}, content-type={content_type}"
-                    )
-                    continue
-
-                saw_json_payload = True
-                if validator(payload):
-                    logger.debug(
-                        f"[知乎] 使用 {profile_name} JSON 接口请求成功: "
-                        f"{profile_url} -> {final_url}"
-                    )
-                    return payload, headers
-
-                saw_invalid_target = True
-                logger.debug(
-                    f"[知乎] {profile_name} JSON 接口拿到的不是目标数据: "
-                    f"{profile_url} -> {final_url}, status={status_code}"
-                )
-            except Exception as exc:
-                last_error = exc
-                logger.debug(
-                    f"[知乎] {profile_name} JSON 接口请求失败: {profile_url}, error={exc}"
-                )
-
-        if saw_challenge or saw_forbidden:
-            if self.mycfg.cookies:
-                raise ParseException(
-                    "知乎抓取失败：当前 cookies 可能失效，或请求仍被风控拦截"
-                )
-            raise ParseException("知乎抓取失败：站点返回反爬挑战页，请配置有效 cookies")
-
-        if saw_login:
-            if self.mycfg.cookies:
-                raise ParseException("知乎抓取失败：当前 cookies 可能失效，或权限不足")
-            raise ParseException(
-                "知乎抓取失败：当前请求被引导到登录页，请配置有效 cookies"
-            )
-
-        if saw_invalid_target or saw_json_payload:
-            raise ParseException("知乎抓取失败：未拿到目标知乎数据")
-
-        raise ParseException("知乎接口请求失败") from last_error
-
-    def _request_profiles(
-        self,
-        url: str,
-        *,
-        accept: str | None = None,
-    ) -> list[tuple[str, str, dict[str, str], str]]:
-        desktop_headers = self._build_request_headers(self.headers, accept=accept)
-        ios_headers = self._build_request_headers(self.ios_headers, accept=accept)
-        mobile_headers = self._build_request_headers(
-            self.android_headers, accept=accept
-        )
-        return [
-            ("desktop", url, desktop_headers, "chrome"),
-            ("ios", url, ios_headers, "safari_ios"),
-            ("mobile", url, mobile_headers, "chrome_android"),
-        ]
-
-    def _build_request_headers(
-        self,
-        base_headers: dict[str, str],
-        *,
-        accept: str | None = None,
-    ) -> dict[str, str]:
-        headers = dict(base_headers)
-        headers.update(
-            {
-                "accept": accept or self.headers["accept"],
-                "accept-language": self.headers["accept-language"],
-                "referer": self.headers["referer"],
-                "origin": self.headers["origin"],
-                "cache-control": self.headers["cache-control"],
-                "pragma": self.headers["pragma"],
-            }
-        )
-        if self.mycfg.cookies:
-            headers["cookie"] = str(self.mycfg.cookies).strip()
-        return headers
-
-    async def _request_text(
-        self,
-        url: str,
-        *,
-        headers: dict[str, str],
-        impersonate: str,
-    ) -> RequestContext:
-        def do_request():
+        def do_req():
             return curl_requests.get(
                 url,
                 headers=headers,
-                impersonate=impersonate,
-                proxies={"https": self.proxy, "http": self.proxy}
-                if self.proxy
-                else None,
-                timeout=self.cfg.common_timeout,
-                allow_redirects=True,
+                impersonate="chrome",
+                timeout=getattr(self.cfg, "common_timeout", 10)
             )
 
-        response = await asyncio.to_thread(do_request)
+        try:
+            response = await asyncio.to_thread(do_req)
+        except Exception as e:
+            logger.error(f"[知乎 HTML] 网络请求崩溃: {e}")
+            raise ParseException("知乎网页请求失败") from e
+
+        if response.status_code >= 400:
+            logger.error(f"[知乎 HTML] 请求被拒: HTTP {response.status_code}")
+            raise ParseException(f"知乎网页拒绝访问: HTTP {response.status_code}")
+
+        soup = BeautifulSoup(response.text, "html.parser")
+        tag = soup.find("script", id="js-initialData")
+        if not tag:
+            raise ParseException("未找到 js-initialData，可能 Cookie 失效，请发送指令【刷新知乎ck】")
         
-        # --- 动态 Cookie 保活机制 ---
-        if response.cookies:
+        try:
+            data = json.loads(tag.text)
+        except Exception:
+            raise ParseException("解析 initialData 失败")
+
+        if validator and not validator(data):
+            raise ParseException("获取到的数据未能通过旧版校验器，可能需要发送指令【刷新知乎ck】！")
+            
+        return data, dict(response.headers)
+
+    def _has_answer_entities(self, payload: dict, question_id: str, answer_id: str, *args, **kwargs) -> bool:
+        return str(answer_id) in payload.get("initialState", {}).get("entities", {}).get("answers", {})
+    _has_answer_entity = _has_answer_entities
+
+    def _has_article_entities(self, payload: dict, article_id: str, *args, **kwargs) -> bool:
+        return str(article_id) in payload.get("initialState", {}).get("entities", {}).get("articles", {})
+    _has_article_entity = _has_article_entities
+
+    def _has_question_entities(self, payload: dict, question_id: str, *args, **kwargs) -> bool:
+        return str(question_id) in payload.get("initialState", {}).get("entities", {}).get("questions", {})
+    _has_question_entity = _has_question_entities
+
+    def _has_pin_entities(self, payload: dict, pin_id: str, *args, **kwargs) -> bool:
+        return str(pin_id) in payload.get("initialState", {}).get("entities", {}).get("pins", {})
+    _has_pin_entity = _has_pin_entities
+
+    def _has_zvideo_entities(self, payload: dict, zvideo_id: str, *args, **kwargs) -> bool:
+        return str(zvideo_id) in payload.get("initialState", {}).get("entities", {}).get("zvideos", {})
+    _has_zvideo_entity = _has_zvideo_entities
+
+    def _entities(self, payload: dict) -> dict:
+        return payload.get("initialState", {}).get("entities", {})
+
+    def _answers(self, entities: dict) -> dict:
+        return entities.get("answers", {})
+
+    def _articles(self, entities: dict) -> dict:
+        return entities.get("articles", {})
+
+    def _questions(self, entities: dict) -> dict:
+        return entities.get("questions", {})
+
+    def _users(self, entities: dict) -> dict:
+        return entities.get("users", {})
+
+    def _pins(self, entities: dict) -> dict:
+        return entities.get("pins", {})
+
+    def _zvideos(self, entities: dict) -> dict:
+        return entities.get("zvideos", {})
+
+    async def _fetch_api_json(self, url: str) -> tuple[dict[str, Any], dict[str, str]]:
+        proxy = getattr(self, "proxy", None)
+        full_cookie = ""
+        try:
+            cookie_file = self.cfg.config_dir / "zhihu_cookies.txt"
+            if cookie_file.exists():
+                full_cookie = cookie_file.read_text(encoding="utf-8").strip()
+        except Exception:
+            pass
+
+        dc0_only = ""
+        real_dc0 = ""
+        if full_cookie:
+            for item in full_cookie.split(";"):
+                if "d_c0=" in item:
+                    dc0_only = item.strip()
+                    real_dc0 = item.split("d_c0=")[1].strip()
+                    break
+
+        cookie_str = ""
+        if "/answer" in url or "answers" in url:
+            cookie_str = full_cookie
+        elif dc0_only:
+            cookie_str = dc0_only
+
+        async with httpx.AsyncClient(proxy=proxy, timeout=getattr(self.cfg, "common_timeout", 10)) as client:
+            headers = {
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+                "Referer": "https://www.zhihu.com/",
+                "x-api-version": "3.0.91",
+                "x-requested-with": "fetch",
+            }
+            if cookie_str:
+                headers["Cookie"] = cookie_str
+
+            request = client.build_request("GET", url, headers=headers)
+            exact_uri = request.url.raw_path.decode("ascii")
+            sign_headers = sign_zhihu_fetch_request(exact_uri, dc0=real_dc0)
+            request.headers.update(sign_headers)
+
             try:
-                new_cookies_dict = response.cookies.get_dict()
-                if new_cookies_dict:
-                    # 1. 读取原有的旧 Cookie
-                    old_cookie_str = str(getattr(self.mycfg, "cookie", ""))
-                    cookie_obj = SimpleCookie(old_cookie_str)
-                    
-                    # 2. 用服务器返回的新字段进行覆盖/更新
-                    for k, v in new_cookies_dict.items():
-                        cookie_obj[k] = v
-                        
-                    # 3. 重新组装成标准的 Cookie 字符串
-                    new_cookie_str = "; ".join([f"{k}={m.value}" for k, m in cookie_obj.items()])
-                    
-                    # 4. 更新内存，让紧接着的下一个并发请求立刻用上新 CK
-                    self.mycfg.cookie = new_cookie_str
-                    
-                    # 5. 持久化写回 config 目录下的 txt 文件
-                    if hasattr(self, "cfg") and hasattr(self.cfg, "cookie_file"):
-                        self.cfg.cookie_file.write_text(new_cookie_str, encoding="utf-8")
-                        logger.debug(f"[知乎保活] 已动态更新本地 CK，接收到 {len(new_cookies_dict)} 个新字段")
+                response = await client.send(request)
             except Exception as e:
-                logger.warning(f"[知乎保活] 动态更新 Cookie 失败: {e}")
+                raise ParseException("知乎 API 网络请求失败") from e
 
-        return {
-            "status_code": int(response.status_code),
-            "final_url": str(response.url),
-            "text": str(response.text),
-            "content_type": str(response.headers.get("content-type", "")),
-        }
-
-    @staticmethod
-    def _extract_json_payload(
-        raw_text: str,
-        *,
-        content_type: str,
-    ) -> dict[str, Any] | None:
-        text = raw_text.strip()
-        if not text:
-            return None
-        if "application/json" not in content_type.lower() and not text.startswith("{"):
-            return None
-        try:
-            payload = json.loads(text)
-        except Exception:
-            return None
-        return payload if isinstance(payload, dict) else None
-
-    def _extract_initial_data(self, html_text: str) -> dict[str, Any] | None:
-        soup = BeautifulSoup(html_text, "html.parser")
-        node = soup.select_one('script#js-initialData[type="text/json"]')
-        if node is None:
-            return None
-        raw = node.get_text(strip=True)
-        if not raw:
-            return None
-        try:
-            payload = json.loads(raw)
-        except Exception:
-            return None
-        initial_state = payload.get("initialState")
-        return payload if isinstance(initial_state, dict) else None
-
-    @staticmethod
-    def _entities(initial_data: dict[str, Any]) -> dict[str, Any]:
-        initial_state = initial_data.get("initialState") or {}
-        entities = initial_state.get("entities") or {}
-        return entities if isinstance(entities, dict) else {}
-
-    def _has_article_entity(
-        self, initial_data: dict[str, Any], article_id: str
-    ) -> bool:
-        article = (self._entities(initial_data).get("articles") or {}).get(article_id)
-        return isinstance(article, dict)
-
-    def _has_answer_entities(
-        self,
-        initial_data: dict[str, Any],
-        question_id: str,
-        answer_id: str,
-    ) -> bool:
-        entities = self._entities(initial_data)
-        question = (entities.get("questions") or {}).get(question_id)
-        answer = (entities.get("answers") or {}).get(answer_id)
-        return isinstance(question, dict) and isinstance(answer, dict)
-
-    def _has_question_entity(
-        self, initial_data: dict[str, Any], question_id: str
-    ) -> bool:
-        question = (self._entities(initial_data).get("questions") or {}).get(
-            question_id
-        )
-        return isinstance(question, dict) and bool(
-            self._pick_first_answer_id(initial_data, question_id)
-        )
-
-    def _has_pin_payload(self, payload: dict[str, Any], pin_id: str) -> bool:
-        current_id = payload.get("id") or payload.get("pin_id") or payload.get("pinId")
-        if current_id is not None and str(current_id) == pin_id:
-            return True
-        return any(
-            payload.get(key) is not None
-            for key in (
-                "content_html",
-                "contentHtml",
-                "content",
-                "author",
-                "created_time",
-                "updated_time",
-            )
-        )
-
-    @staticmethod
-    def _is_challenge_page(html_text: str, *, status_code: int) -> bool:
-        lowered = html_text.lower()
-        return (
-            'id="zh-zse-ck"' in lowered
-            or "static.zhihu.com/zse-ck/" in lowered
-            or 'appname":"zse_ck"' in lowered
-            or (status_code == 403 and "zse-ck" in lowered)
-        )
-
-    @staticmethod
-    def _is_login_page(final_url: str, html_text: str) -> bool:
-        lowered_url = final_url.lower()
-        lowered_html = html_text.lower()
-        return (
-            "/signin" in lowered_url
-            or "/signup" in lowered_url
-            or "<title>知乎 - 有问题，就会有答案</title>" in lowered_html
-        )
-
-    def _pick_first_answer_id(
-        self, initial_data: dict[str, Any], question_id: str
-    ) -> str | None:
-        initial_state = initial_data.get("initialState") or {}
-        answers = ((initial_state.get("question") or {}).get("answers") or {}).get(
-            question_id
-        ) or {}
-        ids = answers.get("ids") or []
-        if not ids or not isinstance(ids[0], dict):
-            return None
-        target = ids[0].get("target")
-        return str(target) if target else None
-
-    async def _load_answer_for_question(
-        self,
-        *,
-        question_id: str,
-        answer_id: str,
-        question_data: dict[str, Any],
-        question_headers: dict[str, str],
-    ) -> tuple[dict[str, Any], dict[str, str], dict[str, Any]]:
-        answer = (self._entities(question_data).get("answers") or {}).get(
-            answer_id
-        ) or {}
-        if (
-            isinstance(answer, dict)
-            and answer.get("content")
-            and not answer.get("contentNeedTruncated")
-        ):
-            return answer, question_headers, question_data
-
-        answer_data, answer_headers = await self._fetch_initial_data(
-            self._answer_url(question_id, answer_id),
-            validator=lambda payload: self._has_answer_entities(
-                payload,
-                question_id,
-                answer_id,
-            ),
-        )
-        answer = (self._entities(answer_data).get("answers") or {}).get(answer_id) or {}
-        if not isinstance(answer, dict):
-            raise ParseException("知乎首条回答数据不存在")
-        return answer, answer_headers, answer_data
-
+        if response.status_code >= 400:
+            raise ParseException(f"知乎 API 拒绝访问: HTTP {response.status_code}")
+        return response.json(), dict(request.headers)
+    
+    # 【新增兼容方法】承接旧版 handlers.py 对想法（Pin）的特殊请求调用
+    async def _fetch_json_data(self, url: str, *args, **kwargs) -> tuple[dict[str, Any], dict[str, str]]:
+        return await self._fetch_api_json(url)
+        
     @staticmethod
     def _article_url(article_id: str) -> str:
         return f"https://zhuanlan.zhihu.com/p/{article_id}"

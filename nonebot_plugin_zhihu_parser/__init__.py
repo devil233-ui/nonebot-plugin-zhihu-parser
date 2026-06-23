@@ -1,5 +1,5 @@
 import re
-from nonebot import on_message
+from nonebot import on_message, on_command
 from nonebot.adapters.onebot.v11 import Message, MessageSegment, MessageEvent, Bot, GroupMessageEvent, PrivateMessageEvent
 from nonebot.log import logger
 from nonebot import get_driver
@@ -13,6 +13,14 @@ from .core.render import Renderer
 from .core.debounce import Debouncer
 from .core.clean import CacheCleaner
 from .core.exception import ParseException
+
+# 洗血专用依赖
+from nonebot import require
+require("nonebot_plugin_apscheduler")
+from nonebot_plugin_apscheduler import scheduler
+from nonebot import on_command
+from .core.parsers.zhihu.refresher import do_refresh_token
+import asyncio
 
 global_config = get_driver().config
 # 从 .env 读取配置，如果没有则提供默认值（分批阈值默认10，防抖默认86400秒）
@@ -40,6 +48,13 @@ async def init_parser():
     
     days = max_age / 86400
     logger.info(f"知乎解析插件：{days:g}天缓存自动清理任务已挂载启动！")
+    
+    # 【新增】夜间自动换血任务
+    @scheduler.scheduled_job("cron", hour=4, minute=0, day="*/3")
+    async def auto_refresh_zhihu_cookie():
+        """每隔 3 天的凌晨 4 点，自动扒底裤换取新 Cookie"""
+        logger.info("[知乎保活] 开始执行夜间自动洗血任务...")
+        await asyncio.to_thread(do_refresh_token, cfg)
 
 def check_zhihu_url():
     async def _check(bot: Bot, event: MessageEvent, state: T_State) -> bool:
@@ -69,6 +84,18 @@ def check_zhihu_url():
     return Rule(_check)
 
 zhihu_matcher = on_message(rule=check_zhihu_url(), priority=10, block=False)
+
+# 【新增】手动强制换血指令，方便你随时补充存活期
+refresh_cmd = on_command("刷新知乎ck", aliases={"知乎保活", "知乎刷新"}, priority=5, block=True)
+
+@refresh_cmd.handle()
+async def force_refresh(bot: Bot, event: MessageEvent):
+    await refresh_cmd.send("开始执行知乎刷新保活脚本...")
+    try:
+        await asyncio.to_thread(do_refresh_token, cfg)
+        await refresh_cmd.send("保活脚本执行完毕！请查看后台日志确认是否拿到了全新的 z_c0。")
+    except Exception as e:
+        await refresh_cmd.send(f"脚本执行崩溃: {e}")
 
 @zhihu_matcher.handle()
 async def handle_zhihu(bot: Bot, event: MessageEvent, state: T_State):
@@ -251,16 +278,17 @@ async def handle_zhihu(bot: Bot, event: MessageEvent, state: T_State):
         if limit_reached:
             await zhihu_matcher.send("不刷屏了，剩下的请点击原链接跳转阅读")
 
-    # 将底部的 except ParseException as e: 替换为：
     except ParseException as e:
-        logger.warning(f"知乎抓取被阻断: {e}")
-        # [新增] 强制打印出被吞噬的底层真实报错
+        err_msg = str(e)
+        logger.warning(f"知乎抓取被阻断: {err_msg}")
         if e.__cause__:
             logger.error(f"💥 [X光机] 底层致命报错: {e.__cause__}")
         
-        # [新增] 触发回滚！把毒数据从防抖池踢出去
+        # 触发回滚！把毒数据从防抖池踢出去
         zhihu_debouncer.rollback_url(session_id, url)
         
-        await zhihu_matcher.send(str(e))
+        await zhihu_matcher.send(f"⚠️ 解析失败: {err_msg}")
+            
     except Exception as e:
         logger.exception("解析知乎链接时发生严重错误")
+        zhihu_debouncer.rollback_url(session_id, url)
