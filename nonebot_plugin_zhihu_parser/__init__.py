@@ -103,6 +103,8 @@ async def handle_zhihu(bot: Bot, event: MessageEvent, state: T_State):
         logger.warning("知乎解析器仍在初始化中，请稍后再试")
         return
         
+    await zhihu_matcher.send("识别到知乎链接，开始解析")
+    
     text = state['zhihu_raw']
     base_match = state['zhihu_match']
     
