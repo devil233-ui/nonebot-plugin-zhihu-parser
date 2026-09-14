@@ -1,5 +1,6 @@
 import re
-from nonebot import on_message, on_command
+from nonebot import on_message, on_command, get_bots
+from nonebot.permission import SUPERUSER
 from nonebot.adapters.onebot.v11 import Message, MessageSegment, MessageEvent, Bot, GroupMessageEvent, PrivateMessageEvent
 from nonebot.log import logger
 from nonebot import get_driver
@@ -20,7 +21,9 @@ require("nonebot_plugin_apscheduler")
 from nonebot_plugin_apscheduler import scheduler
 from nonebot import on_command
 from .core.parsers.zhihu.refresher import do_refresh_token
-import asyncio
+from .core.parsers.zhihu.maintenance import (
+    RefreshMonitor, format_refresh_result, refresh_alert_targets, refresh_job_options,
+)
 
 global_config = get_driver().config
 # 从 .env 读取配置，如果没有则提供默认值（分批阈值默认10，防抖默认86400秒）
@@ -30,6 +33,12 @@ ZHIHU_CACHE_MAX_AGE = getattr(global_config, "zhihu_cache_max_age", 86400 * 7)
 ZHIHU_MAX_IMAGES = getattr(global_config, "zhihu_max_images", 50)
 
 cfg = PluginConfig()
+refresh_monitor = RefreshMonitor(
+    cfg.data_dir / "zhihu_refresh_state.json",
+    refresh_alert_targets(global_config),
+    do_refresh_token,
+    lambda: [bot for bot in get_bots().values() if isinstance(bot, Bot)],
+)
 zhihu_parser = None
 zhihu_renderer = None
 # 将配置好的防抖时间传给防抖器
@@ -49,12 +58,28 @@ async def init_parser():
     days = max_age / 86400
     logger.info(f"知乎解析插件：{days:g}天缓存自动清理任务已挂载启动！")
     
-    # 【新增】夜间自动换血任务
-    @scheduler.scheduled_job("cron", hour=4, minute=0, day="*/3")
-    async def auto_refresh_zhihu_cookie():
-        """每隔 3 天的凌晨 4 点，自动扒底裤换取新 Cookie"""
-        logger.info("[知乎保活] 开始执行夜间自动洗血任务...")
-        await asyncio.to_thread(do_refresh_token, cfg)
+    scheduler.add_job(
+        auto_refresh_zhihu_cookie,
+        **refresh_job_options(
+            scheduler.timezone,
+            getattr(global_config, "zhihu_refresh_jitter_seconds", 900),
+        ),
+    )
+
+
+async def auto_refresh_zhihu_cookie():
+    logger.info("[知乎保活] 开始自动保活")
+    result = await refresh_monitor.run(cfg)
+    if result.ok:
+        logger.info(format_refresh_result(result))
+    else:
+        logger.warning(format_refresh_result(result))
+
+
+@get_driver().on_bot_connect
+async def resume_refresh_alerts(bot):
+    if isinstance(bot, Bot):
+        await refresh_monitor.notify_pending()
 
 def check_zhihu_url():
     async def _check(bot: Bot, event: MessageEvent, state: T_State) -> bool:
@@ -86,16 +111,16 @@ def check_zhihu_url():
 zhihu_matcher = on_message(rule=check_zhihu_url(), priority=10, block=False)
 
 # 【新增】手动强制换血指令，方便你随时补充存活期
-refresh_cmd = on_command("刷新知乎ck", aliases={"知乎保活", "知乎刷新"}, priority=5, block=True)
+refresh_cmd = on_command(
+    "刷新知乎ck", aliases={"知乎保活", "知乎刷新"},
+    permission=SUPERUSER, priority=5, block=True,
+)
 
 @refresh_cmd.handle()
 async def force_refresh(bot: Bot, event: MessageEvent):
-    await refresh_cmd.send("开始执行知乎刷新保活脚本...")
-    try:
-        await asyncio.to_thread(do_refresh_token, cfg)
-        await refresh_cmd.send("保活脚本执行完毕！请查看后台日志确认是否拿到了全新的 z_c0。")
-    except Exception as e:
-        await refresh_cmd.send(f"脚本执行崩溃: {e}")
+    await refresh_cmd.send("正在刷新知乎登录信息，请稍候。")
+    result = await refresh_monitor.run(cfg)
+    await refresh_cmd.send(format_refresh_result(result))
 
 @zhihu_matcher.handle()
 async def handle_zhihu(bot: Bot, event: MessageEvent, state: T_State):

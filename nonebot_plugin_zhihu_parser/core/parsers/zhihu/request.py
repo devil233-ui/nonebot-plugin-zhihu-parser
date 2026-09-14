@@ -8,6 +8,7 @@ from curl_cffi import requests as curl_requests
 from nonebot.log import logger
 
 from .zse_signer import sign_zhihu_fetch_request
+from .identity import ZHIHU_USER_AGENT
 from ...exception import ParseException
 
 class ZhihuRequestMixin:
@@ -169,7 +170,7 @@ class ZhihuRequestMixin:
 
         async with httpx.AsyncClient(proxy=proxy, timeout=getattr(self.cfg, "common_timeout", 10)) as client:
             headers = {
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+                "User-Agent": ZHIHU_USER_AGENT,
                 "Referer": "https://www.zhihu.com/",
                 "x-api-version": "3.0.91",
                 "x-requested-with": "fetch",
