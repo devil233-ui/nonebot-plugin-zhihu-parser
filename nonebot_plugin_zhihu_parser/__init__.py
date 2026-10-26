@@ -7,6 +7,7 @@ from nonebot import get_driver
 from nonebot.rule import Rule
 from nonebot.typing import T_State
 
+from nonebot.plugin import PluginMetadata
 from nonebot_plugin_zhihu_parser.config import PluginConfig
 from .core.parsers.zhihu.parser import ZhihuParser
 from .core.download import Downloader
@@ -43,6 +44,15 @@ zhihu_parser = None
 zhihu_renderer = None
 # 将配置好的防抖时间传给防抖器
 zhihu_debouncer = Debouncer(ttl_seconds=ZHIHU_DEBOUNCE_TIME)
+
+__plugin_meta__ = PluginMetadata(
+    name="知乎解析",
+    description="解析知乎问题、回答、专栏文章与想法链接，生成预览卡片并转发图文内容",
+    usage="直接发送知乎链接即可自动解析；引用含知乎链接的消息回复「解析」可重新解析；管理员发送「知乎保活」可手动刷新登录信息",
+    type="application",
+    homepage="https://github.com/devil233-ui/nonebot-plugin-zhihu-parser",
+    supported_adapters={"~onebot.v11"},
+)
 
 @get_driver().on_startup
 async def init_parser():
