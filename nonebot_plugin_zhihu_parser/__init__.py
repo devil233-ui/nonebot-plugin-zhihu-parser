@@ -8,7 +8,7 @@ from nonebot.rule import Rule
 from nonebot.typing import T_State
 
 from nonebot.plugin import PluginMetadata
-from nonebot_plugin_zhihu_parser.config import PluginConfig
+from nonebot_plugin_zhihu_parser.config import Config, PluginConfig
 from .core.parsers.zhihu.parser import ZhihuParser
 from .core.download import Downloader
 from .core.render import Renderer
@@ -19,6 +19,7 @@ from .core.exception import ParseException
 # 洗血专用依赖
 from nonebot import require
 require("nonebot_plugin_apscheduler")
+require("nonebot_plugin_localstore")
 from nonebot_plugin_apscheduler import scheduler
 from nonebot import on_command
 from .core.parsers.zhihu.refresher import do_refresh_token
@@ -26,17 +27,16 @@ from .core.parsers.zhihu.maintenance import (
     RefreshMonitor, format_refresh_result, refresh_alert_targets, refresh_job_options,
 )
 
-global_config = get_driver().config
-# 从 .env 读取配置，如果没有则提供默认值（分批阈值默认10，防抖默认86400秒）
-ZHIHU_BATCH_SIZE = getattr(global_config, "zhihu_batch_size", 10)
-ZHIHU_DEBOUNCE_TIME = getattr(global_config, "zhihu_debounce_time", 86400)
-ZHIHU_CACHE_MAX_AGE = getattr(global_config, "zhihu_cache_max_age", 86400 * 7)
-ZHIHU_MAX_IMAGES = getattr(global_config, "zhihu_max_images", 50)
-
+# 配置由插件配置模型提供，目录由 localstore 提供
 cfg = PluginConfig()
+ZHIHU_BATCH_SIZE = cfg.config.zhihu_batch_size
+ZHIHU_DEBOUNCE_TIME = cfg.config.zhihu_debounce_time
+ZHIHU_CACHE_MAX_AGE = cfg.config.zhihu_cache_max_age
+ZHIHU_MAX_IMAGES = cfg.config.zhihu_max_images
+
 refresh_monitor = RefreshMonitor(
     cfg.data_dir / "zhihu_refresh_state.json",
-    refresh_alert_targets(global_config),
+    refresh_alert_targets(cfg.config, get_driver().config),
     do_refresh_token,
     lambda: [bot for bot in get_bots().values() if isinstance(bot, Bot)],
 )
@@ -52,6 +52,7 @@ __plugin_meta__ = PluginMetadata(
     type="application",
     homepage="https://github.com/devil233-ui/nonebot-plugin-zhihu-parser",
     supported_adapters={"~onebot.v11"},
+    config=Config,
 )
 
 @get_driver().on_startup
@@ -72,7 +73,7 @@ async def init_parser():
         auto_refresh_zhihu_cookie,
         **refresh_job_options(
             scheduler.timezone,
-            getattr(global_config, "zhihu_refresh_jitter_seconds", 900),
+            cfg.config.zhihu_refresh_jitter_seconds,
         ),
     )
 

@@ -35,7 +35,8 @@ pip install nonebot-plugin-zhihu-parser
 
 ## 配置项
 
-在 `.env.*` 中按需配置（以下为插件默认值）：
+配置通过插件配置类读取，键名沿用 `ZHIHU_*` 环境变量，在 `.env.*` 中按需配置
+（以下为插件默认值）：
 
 ```dotenv
 # 单次解析最多输出的图片/视频总量阈值
@@ -46,15 +47,31 @@ ZHIHU_BATCH_SIZE=10
 ZHIHU_DEBOUNCE_TIME=86400
 # 自动清理多久以前的缓存文件（单位：秒。604800秒 = 7天）
 ZHIHU_CACHE_MAX_AGE=604800
+# 访问知乎使用的代理，留空则直连
+# ZHIHU_PROXY=
 # 知乎登录 Cookie（推荐留空，改用下方的 CK 文件管理）
 ZHIHU_COOKIE=""
+# 表情资源地址与风格，一般无需修改
+# EMOJI_CDN=https://fastly.jsdelivr.net/gh/twitter/twemoji@14.0.2/assets/72x72/
+# EMOJI_STYLE=twemoji
 ```
+
+数据目录由 [nonebot-plugin-localstore](https://github.com/nonebot/plugin-localstore)
+提供，默认落在系统用户目录（Linux 下形如 `~/.local/share/nonebot2/nonebot_plugin_zhihu_parser`）；
+如需沿用以机器人工作目录为根的旧布局，加上：
+
+```dotenv
+LOCALSTORE_USE_CWD=true
+```
+
+此时数据、配置、缓存分别位于工作目录下的 `data/`、`config/`、`cache/`
+同名子目录中。
 
 ## 登录保活与失败提醒
 
-登录信息文件位于机器人工作目录 `config/nonebot_plugin_zhihu_parser/zhihu_cookies.txt`，
-单行 `k=v; k=v` 格式，需包含 `z_c0`、`d_c0`、`_xsrf`、`SESSIONID` 四个键；
-替换文件后无需重启即可生效。
+登录信息文件位于插件的配置目录（localstore 的 `config` 目录）下的
+`zhihu_cookies.txt`，单行 `k=v; k=v` 格式，需包含 `z_c0`、`d_c0`、`_xsrf`、
+`SESSIONID` 四个键；替换文件后无需重启即可生效。
 
 - 自动保活沿用固定的日期安排，按机器人配置的时区在凌晨4点后随机延迟最多15分钟，
   不再每次都卡在整点执行。这是错峰措施，不保证避免平台风控。

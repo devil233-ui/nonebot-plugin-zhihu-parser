@@ -122,12 +122,18 @@ def _recipient_ids(value) -> tuple[int, ...]:
     return tuple(sorted(result))
 
 
-def refresh_alert_targets(config) -> tuple[tuple[str, int], ...]:
+def refresh_alert_targets(config, driver_config=None) -> tuple[tuple[str, int], ...]:
+    """解析保活失败提醒的目标。
+
+    提醒相关配置来自插件配置模型；未显式指定私聊对象时，默认使用机器人管理员
+    （``superusers``），该字段属于驱动配置，因此单独由 ``driver_config`` 提供。
+    """
     groups = _recipient_ids(getattr(config, "zhihu_refresh_alert_groups", ()))
     users = getattr(config, "zhihu_refresh_alert_users", None)
     # 明确配置群后不额外私聊；无专用目标时才使用现有管理员名单。
     if users is None:
-        users = () if groups else getattr(config, "superusers", ())
+        admin_source = driver_config if driver_config is not None else config
+        users = () if groups else getattr(admin_source, "superusers", ())
     return tuple(("group", group) for group in groups) + tuple(
         ("private", user) for user in _recipient_ids(users)
     )
